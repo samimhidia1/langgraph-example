@@ -1,5 +1,6 @@
+import logging
 import os
-from typing import TypedDict, Annotated, Sequence
+from typing import TypedDict, Annotated, Sequence, Dict
 from functools import lru_cache
 
 import requests
@@ -10,6 +11,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.graph import StateGraph, END, add_messages
 from langchain_anthropic import ChatAnthropic
 from langchain.prompts import ChatPromptTemplate
+from typing import List
 
 
 # Function to get AI response from external API
@@ -108,11 +110,11 @@ def _get_model():
 
 
 # Define AgentState
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     rag_result: str
     memo: str
-    question_count: int = 0
+    question_count: int
 
 
 # Function to determine next action
@@ -130,66 +132,117 @@ def should_continue(state: AgentState):
 
 
 # System prompt
-# System prompt
 system_prompt = """
-You are a sophisticated multi-agent assistant designed to manage complex workflows and provide 
-comprehensive assistance. Your primary functions include information retrieval, memo generation, and memo editing. 
-Follow these guidelines:
+You are an advanced AI assistant managing a multi-tool workflow for complex information tasks. Your primary tools are:
 
-1. Default Tool: Always use the 'RAG' (Retrieval-Augmented Generation) tool as your default for answering questions 
-and providing information. This ensures that your responses are based on the most up-to-date and relevant data.
+1. RAG (Retrieval-Augmented Generation): Your default tool for answering questions and providing up-to-date information.
+2. MemoGenerator: For creating structured summaries of conversations or complex information.
+3. EditMemo: For modifying existing memos based on user requests.
 
-2. MemoGenerator Tool: Use the 'MemoGenerator' tool when:
-   - The user explicitly requests a memo or summary of the conversation.
-   - The user asks for a structured overview of the information discussed.
-   - You determine that a memo would be beneficial to organize complex information.
+Guidelines:
 
-3. EditMemo Tool: Employ the 'EditMemo' tool when:
-   - The user specifically asks for changes or updates to a previously generated memo.
-   - The user requests additions, deletions, or modifications to existing information in a memo format.
+1. Tool Selection:
+   - Default to RAG for most queries.
+   - Use MemoGenerator when explicitly requested or when summarizing complex information would be beneficial.
+   - Use EditMemo only when modifying an existing memo.
 
-4. Workflow Management:
-   - Begin each interaction by assessing the user's request.
-   - If the request doesn't explicitly call for memo generation or editing, default to using the RAG tool.
-   - Transition between tools smoothly based on the context of the conversation and user needs.
+2. Workflow Management:
+   - Assess each user request carefully before selecting a tool.
+   - Transition smoothly between tools as needed, explaining your actions to the user.
+   - Build upon previous information to avoid repetition.
 
-5. Conversation Flow: - Maintain context throughout the conversation. - If using the RAG tool multiple times, 
-ensure that you're building upon previous information rather than repeating it. - When switching to MemoGenerator or 
-EditMemo, clearly indicate to the user that you're changing tools to better assist them.
+3. User Interaction:
+   - If a request is ambiguous, ask for clarification before proceeding.
+   - Clearly communicate your actions, especially when switching tools.
+   - Provide concise, relevant responses focused on addressing the user's needs.
 
-6. User Guidance:
-   - If the user's request is ambiguous, ask for clarification before selecting a tool.
-   - Provide clear explanations of your actions, especially when transitioning between tools.
+4. Information Handling:
+   - Ensure all information provided is accurate and up-to-date.
+   - Organize complex information logically and coherently.
+   - When using RAG multiple times, synthesize information to provide comprehensive answers.
 
-Remember, your goal is to provide the most helpful and coherent assistance possible, seamlessly integrating 
-information retrieval, memo creation, and editing as needed throughout the conversation."""
+5. Memo Management:
+   - Create memos that are clear, structured, and easy to understand.
+   - When editing memos, maintain their overall structure and clarity.
+   - Confirm user satisfaction after memo creation or editing.
 
+Your goal is to provide efficient, accurate, and helpful assistance while seamlessly integrating the various tools at your disposal. Adapt your communication style to the user's needs and the complexity of the task at hand.
+"""
 
 # Function to call the model
+
+
 def call_model(state: AgentState):
     messages = state["messages"]
     model = _get_model()
-    response = model.invoke(
-        [{"role": "system", "content": system_prompt}] + messages
-    )
+
+    # Convert messages to the format expected by the model
+    formatted_messages: List[Dict[str, str]] = [
+                                                   {"role": "system", "content": system_prompt}
+                                               ] + [
+                                                   {
+                                                       "role": "user" if isinstance(msg,
+                                                                                    HumanMessage) else "assistant" if isinstance(
+                                                           msg, AIMessage) else "system",
+                                                       "content": msg.content
+                                                   }
+                                                   for msg in messages
+                                               ]
+
+    response = model.invoke(formatted_messages)
+
+    # Convert the response to an AIMessage
+    ai_response = AIMessage(content=response.content)
+
     return {
-        "messages": state["messages"] + [response],
+        "messages": list(state["messages"]) + [ai_response],  # Convert Sequence to list before concatenating
         "question_count": (state.get("question_count") or 0) + 1
     }
 
 
 # Function to use RAG tool
+
+
 def use_rag_tool(state: AgentState):
-    rag_tool = [tool for tool in tools if tool.name == "RAG"][0]
-    last_human_message = next(msg for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage))
-    chat_history = [msg.content for msg in state["messages"] if isinstance(msg, (HumanMessage, AIMessage))]
-    rag_result = rag_tool.func(last_human_message.content, chat_history)
-    return {
-        "messages": state["messages"] + [AIMessage(content=f"RAG result: {rag_result}")],
-        "rag_result": rag_result,
-        "memo": state["memo"],
-        "question_count": (state.get("question_count") or 0) + 1
-    }
+    try:
+        rag_tool = [tool for tool in tools if tool.name == "RAG"][0]
+
+        # Extract the last human message content
+        last_human_message = next(msg for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage))
+        query = last_human_message.content
+
+        # Extract chat history
+        chat_history = [
+            {"role": "human" if isinstance(msg, HumanMessage) else "ai", "content": msg.content}
+            for msg in state["messages"]
+            if isinstance(msg, (HumanMessage, AIMessage))
+        ]
+
+        # Call the RAG tool with the correct input format
+        rag_result = rag_tool.func(query=query, chat_history=chat_history)
+
+        # Convert Sequence to list before concatenating
+        updated_messages: List[BaseMessage] = list(state["messages"]) + [AIMessage(content=rag_result)]
+
+        return {
+            "messages": updated_messages,
+            "rag_result": rag_result,
+            "memo": state["memo"],
+            "question_count": (state.get("question_count") or 0) + 1
+        }
+    except Exception as e:
+        logging.error(f"Error in use_rag_tool: {str(e)}")
+        # Convert Sequence to list before concatenating
+        error_messages: List[BaseMessage] = list(state["messages"]) + [AIMessage(
+            content="I apologize, but I encountered an error while retrieving information. Could you please rephrase "
+                    "your question?")]
+        return {
+            "messages": error_messages,
+            "rag_result": "",
+            "memo": state["memo"],
+            "question_count": (state.get("question_count") or 0) + 1
+        }
+
 
 # Create workflow
 workflow = StateGraph(AgentState)
