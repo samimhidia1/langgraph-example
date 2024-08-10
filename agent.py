@@ -33,6 +33,7 @@ def get_ai_response(chat_history, question):
 
 # RAG tool function
 def rag_tool(query: str, chat_history: list) -> str:
+    # Generate a query to send to the RAG API
     response = get_ai_response(chat_history, query)
     return response
 
@@ -111,7 +112,7 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     rag_result: str
     memo: str
-    question_count: int
+    question_count: int = 0
 
 
 # Function to determine next action
@@ -130,7 +131,8 @@ def should_continue(state: AgentState):
 
 # System prompt
 # System prompt
-system_prompt = """You are a sophisticated multi-agent assistant designed to manage complex workflows and provide 
+system_prompt = """
+You are a sophisticated multi-agent assistant designed to manage complex workflows and provide 
 comprehensive assistance. Your primary functions include information retrieval, memo generation, and memo editing. 
 Follow these guidelines:
 
@@ -172,7 +174,7 @@ def call_model(state: AgentState):
     )
     return {
         "messages": state["messages"] + [response],
-        "question_count": state["question_count"] + 1
+        "question_count": (state.get("question_count") or 0) + 1
     }
 
 
@@ -186,9 +188,8 @@ def use_rag_tool(state: AgentState):
         "messages": state["messages"] + [AIMessage(content=f"RAG result: {rag_result}")],
         "rag_result": rag_result,
         "memo": state["memo"],
-        "question_count": state["question_count"] + 1
+        "question_count": (state.get("question_count") or 0) + 1
     }
-
 
 # Create workflow
 workflow = StateGraph(AgentState)
@@ -221,7 +222,7 @@ def run_workflow(user_input: str):
         messages=[HumanMessage(content=user_input)],
         rag_result="",
         memo="",
-        question_count=0
+        question_count=0  # Ensure this is always initialized
     )
 
     for output in graph.stream(initial_state):
