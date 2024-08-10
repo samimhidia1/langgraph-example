@@ -1,102 +1,141 @@
 from typing import TypedDict, Annotated, Sequence, Literal
-
 from functools import lru_cache
-from langchain_core.messages import BaseMessage
-from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain.tools import Tool
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import StateGraph, END, add_messages
+from langserve.client import RemoteRunnable
 
-tools = [TavilySearchResults(max_results=1)]
+# Define the remote RAG tool
+rag_runnable = RemoteRunnable(
+    "https://casusragyqouf1pv-casus-mvp-latest.functions.fnc.fr-par.scw.cloud/rag-conversation")
 
-@lru_cache(maxsize=4)
-def _get_model(model_name: str):
-    if model_name == "openai":
-        model = ChatOpenAI(temperature=0, model_name="gpt-4o")
-    elif model_name == "anthropic":
-        model =  ChatAnthropic(temperature=0, model_name="claude-3-sonnet-20240229")
-    else:
-        raise ValueError(f"Unsupported model type: {model_name}")
 
+def rag_tool(query: str, chat_history: list) -> str:
+    response = rag_runnable.invoke(input={"chat_history": chat_history, "question": query})
+    return response
+
+
+def memo_tool(conversation_history: str) -> str:
+    return f"Generated memo based on: {conversation_history}"
+
+
+def edit_memo(current_memo: str, edit_request: str) -> str:
+    return f"Edited memo based on request: {edit_request}\nOriginal memo: {current_memo}"
+
+
+tools = [
+    Tool.from_function(func=rag_tool, name="RAG", description="Retrieves information to answer questions"),
+    Tool.from_function(func=memo_tool, name="MemoGenerator", description="Generates a structured memo"),
+    Tool.from_function(func=edit_memo, name="EditMemo", description="Edits the existing memo")
+]
+
+
+@lru_cache(maxsize=1)
+def _get_model():
+    model = ChatOpenAI(temperature=0, model_name="gpt-4")
     model = model.bind_tools(tools)
     return model
 
 
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
+    rag_result: str
+    memo: str
+    question_count: int
 
 
-# Define the function that determines whether to continue or not
 def should_continue(state):
+    question_count = state["question_count"]
     messages = state["messages"]
     last_message = messages[-1]
-    # If there are no tool calls, then we finish
-    if not last_message.tool_calls:
+
+    if question_count < 2:
+        return "use_rag"
+    elif not last_message.tool_calls:
         return "end"
-    # Otherwise if there is, we continue
     else:
         return "continue"
 
 
-system_prompt = """Be a helpful assistant"""
+system_prompt = """You are a multi-agent assistant. Manage the workflow and decide which tool to use next: 'RAG', 
+'MemoGenerator', 'EditMemo', or finish the conversation. For the first two interactions, always use the RAG tool."""
 
-# Define the function that calls the model
-def call_model(state, config):
+
+def call_model(state):
     messages = state["messages"]
-    messages = [{"role": "system", "content": system_prompt}] + messages
-    model_name = config.get('configurable', {}).get("model_name", "anthropic")
-    model = _get_model(model_name)
-    response = model.invoke(messages)
-    # We return a list, because this will get added to the existing list
+    model = _get_model()
+    response = model.invoke(
+        [{"role": "system", "content": system_prompt}] + messages
+    )
     return {"messages": [response]}
 
 
-# Define the function to execute tools
+def use_rag_tool(state):
+    rag_tool = [tool for tool in tools if tool.name == "RAG"][0]
+    last_human_message = next(msg for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage))
+    chat_history = [msg.content for msg in state["messages"] if isinstance(msg, (HumanMessage, AIMessage))]
+    rag_result = rag_tool.func(last_human_message.content, chat_history)
+    return {
+        "messages": state["messages"] + [AIMessage(content=f"RAG result: {rag_result}")],
+        "rag_result": rag_result,
+        "memo": state["memo"],
+        "question_count": state["question_count"] + 1
+    }
+
+
 tool_node = ToolNode(tools)
 
-# Define the config
-class GraphConfig(TypedDict):
-    model_name: Literal["anthropic", "openai"]
+workflow = StateGraph(AgentState)
 
-
-# Define a new graph
-workflow = StateGraph(AgentState, config_schema=GraphConfig)
-
-# Define the two nodes we will cycle between
 workflow.add_node("agent", call_model)
 workflow.add_node("action", tool_node)
+workflow.add_node("use_rag", use_rag_tool)
 
-# Set the entrypoint as `agent`
-# This means that this node is the first one called
 workflow.set_entry_point("agent")
 
-# We now add a conditional edge
 workflow.add_conditional_edges(
-    # First, we define the start node. We use `agent`.
-    # This means these are the edges taken after the `agent` node is called.
     "agent",
-    # Next, we pass in the function that will determine which node is called next.
     should_continue,
-    # Finally we pass in a mapping.
-    # The keys are strings, and the values are other nodes.
-    # END is a special node marking that the graph should finish.
-    # What will happen is we will call `should_continue`, and then the output of that
-    # will be matched against the keys in this mapping.
-    # Based on which one it matches, that node will then be called.
     {
-        # If `tools`, then we call the tool node.
+        "use_rag": "use_rag",
         "continue": "action",
-        # Otherwise we finish.
         "end": END,
     },
 )
 
-# We now add a normal edge from `tools` to `agent`.
-# This means that after `tools` is called, `agent` node is called next.
 workflow.add_edge("action", "agent")
+workflow.add_edge("use_rag", "agent")
 
-# Finally, we compile it!
-# This compiles it into a LangChain Runnable,
-# meaning you can use it as you would any other runnable
 graph = workflow.compile()
+
+
+# Function to run the workflow
+def run_workflow(user_input: str):
+    initial_state = AgentState(
+        messages=[HumanMessage(content=user_input)],
+        rag_result="",
+        memo="",
+        question_count=0
+    )
+
+    for output in graph.stream(initial_state):
+        if "messages" in output:
+            for message in output["messages"]:
+                if isinstance(message, AIMessage):
+                    print(f"AI: {message.content}")
+        if output.get("memo"):
+            print(f"Current Memo: {output['memo']}")
+        if len(output["messages"]) % 2 == 0:  # Every even number of messages, we ask for user input
+            user_input = input("Human: ")
+            output["messages"].append(HumanMessage(content=user_input))
+
+    print("Workflow completed.")
+
+
+# Example usage
+if __name__ == "__main__":
+    print("Welcome to the Multi-Agent Assistant!")
+    initial_question = input("Human: ")
+    run_workflow(initial_question)
