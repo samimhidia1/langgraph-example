@@ -1,28 +1,126 @@
-from typing import TypedDict, Annotated, Sequence, Literal
+import os
+from typing import TypedDict, Annotated, Sequence
 from functools import lru_cache
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+
+import requests
+from langchain_core.messages import BaseMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langchain.tools import Tool
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import StateGraph, END, add_messages
-from langserve.client import RemoteRunnable
+from langchain_anthropic import ChatAnthropic
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema import HumanMessage, SystemMessage
 
-# Define the remote RAG tool
-rag_runnable = RemoteRunnable(
-    "https://casusragyqouf1pv-casus-mvp-latest.functions.fnc.fr-par.scw.cloud/rag-conversation")
+
+def get_ai_response(chat_history, question):
+    url = "https://casusragyqouf1pv-casus-mvp-latest.functions.fnc.fr-par.scw.cloud/rag-conversation/invoke"
+    headers = {"Content-Type": "application/json"}
+    print("chat_history", chat_history)
+    payload = {
+        "input": {
+            "chat_history": chat_history,
+            "question": question
+        },
+        "config": {},
+        "kwargs": {},
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        response.raise_for_status()
 
 
 def rag_tool(query: str, chat_history: list) -> str:
-    response = rag_runnable.invoke(input={"chat_history": chat_history, "question": query})
+    response = get_ai_response(chat_history, query)
     return response
 
 
+def open_file(file_path):
+    """
+    opens a txt file and returns the contents
+    :param file_path:
+    :return:
+    """
+    with open(file_path, "r", encoding='utf-8') as file:
+        return file.read()
+
+
+def generate_memo(chat_history):
+    """
+    Generate a memo based on the chat history using Anthropic's Claude model.
+    """
+    # Initialize the ChatAnthropic model
+    model = ChatAnthropic(
+        model="claude-3-sonnet-20240320",
+        max_tokens=4000,
+        temperature=0.2,
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY")
+    )
+
+    # Load system and user prompts
+    system_prompt = open_file("prompt/claude_system_memo_prompt.txt")
+    user_prompt_template = open_file("prompt/claude_user_memo_prompt.txt")
+
+    # Create a ChatPromptTemplate
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt_template)
+    ])
+
+    # Format the prompt with the chat history
+    formatted_prompt = prompt.format_messages(CHAT_HISTORY=str(chat_history))
+
+    # Generate the response
+    response = model(formatted_prompt)
+
+    print(response.content)
+
+    return response.content
+
+
 def memo_tool(conversation_history: str) -> str:
-    return f"Generated memo based on: {conversation_history}"
+    memo = generate_memo(conversation_history)
+    print(f"Generated memo: {memo}")
+    return memo
 
 
 def edit_memo(current_memo: str, edit_request: str) -> str:
-    return f"Edited memo based on request: {edit_request}\nOriginal memo: {current_memo}"
+    """
+    Edit the current memo based on the user's request.
+    """
+    # Initialize the ChatAnthropic model
+    model = ChatAnthropic(
+        model="claude-3.5-sonnet-20240320",
+        max_tokens=8000,
+        temperature=0.2,
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY")
+    )
+
+    # Load system and user prompts
+    system_prompt = open_file("prompt/claude_system_edit_memo_prompt.txt")
+    user_prompt_template = open_file("prompt/claude_user_edit_memo_prompt.txt")
+
+    # Create a ChatPromptTemplate
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt_template)
+    ])
+
+    # Format the prompt with the current memo and the user's edit request
+
+    formatted_prompt = prompt.format_messages(CURRENT_MEMO=current_memo, EDIT_REQUEST=edit_request)
+
+    # Generate the response
+
+    response = model(formatted_prompt)
+
+    print(response.content)
+
+    return response.content
 
 
 tools = [

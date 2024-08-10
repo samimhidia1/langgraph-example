@@ -1,0 +1,15 @@
+Please edit and improve the following legal memo based on the edit request provided. Ensure your edits maintain the memo's professional tone and legal accuracy while addressing the specific changes requested.
+
+Current Memo:
+```
+{{CURRENT_MEMO}}
+```
+
+Edit Request:
+{{EDIT_REQUEST}}
+
+Please provide the revised memo, incorporating the requested changes and any other improvements you deem necessary to enhance its clarity, accuracy, and relevance. Maintain the original structure and format unless the edit request specifically asks for changes to these elements.
+
+Begin your response with the edited memo, starting from the title. Use Markdown formatting for headings, lists, and emphasis. Ensure all legal references are accurate and up-to-date.
+
+After the edited memo, please provide a brief summary of the changes made and the reasoning behind them.

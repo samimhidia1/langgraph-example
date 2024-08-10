@@ -1,0 +1,13 @@
+#claude_user_memo_prompt.txt
+Generate an outstanding memo using the entire context provided below, be comprehensive, detailed and provide rich and accurate answers
+
+<legal_issue>
+{{CHAT_HISTORY}}
+</legal_issue>
+
+This is the specific legal issue you need to address with verbosity, precision and contextual accuracy.
+Begin your response immediately after these instructions, starting with the document title.
+Ensure your answer is comprehensive, well-structured, and rich in accurate legal references, including all relevant URLs from the provided context.
+Use formal, professional language and provide detailed explanations and reasoning for your conclusions as the best top-notch tax lawyer in the world would do.
+Walk me through this context in manageable parts step by step, summarizing and analyzing as we go.
+Begin your response immediately after these instructions, starting with the document title.
