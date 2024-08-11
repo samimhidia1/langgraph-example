@@ -13,10 +13,8 @@ from langgraph.graph import StateGraph, END, add_messages
 from langchain_anthropic import ChatAnthropic
 from langchain.prompts import ChatPromptTemplate
 from typing import List
-from dotenv import load_dotenv
 from requests import RequestException
 
-load_dotenv()
 
 
 # Function to get AI response from external API
@@ -53,6 +51,7 @@ def get_ai_response(chat_history, question, max_retries=3):
                 raise
             time.sleep(2 ** attempt)  # Exponential backoff
 
+
 # RAG tool function
 def rag_tool(query: str, chat_history: list) -> str:
     try:
@@ -67,6 +66,7 @@ def rag_tool(query: str, chat_history: list) -> str:
     except Exception as e:
         print(f"Error in RAG tool: {e}")
         return "I apologize, but I encountered an error while retrieving information. Let me try to answer based on my general knowledge."
+
 
 # Function to open and read file content
 def open_file(file_path):
@@ -162,6 +162,7 @@ def should_continue(state: AgentState):
     else:
         return "continue"
 
+
 # System prompt
 system_prompt = """
 You are an advanced AI assistant managing a multi-tool workflow for complex information tasks. Your primary tools are:
@@ -199,6 +200,7 @@ Guidelines:
 
 Your goal is to provide efficient, accurate, and helpful assistance while seamlessly integrating the various tools at your disposal. Adapt your communication style to the user's needs and the complexity of the task at hand.
 """
+
 
 # Function to call the model
 
@@ -311,6 +313,7 @@ def run_workflow(user_input: str):
         print(f"Current question count: {state.get('question_count', 'N/A')}")
 
     print("Workflow completed.")
+
 
 # Example usage
 if __name__ == "__main__":
