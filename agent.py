@@ -44,7 +44,13 @@ def get_ai_response(chat_history, question):
 
 # Define node functions
 def call_model(state: AgentState) -> AgentState:
-    last_message = state["messages"][-1].content
+    if not state["messages"]:
+        # Gérer le cas où il n'y a pas de messages
+        return state
+
+    last_message = state["messages"][-1]
+    last_message_content = last_message.get('content', '') if isinstance(last_message, dict) else last_message.content
+
     if state["next_action"] == "draft_memo":
         system_prompt = """
         You are a highly experienced legal expert and tax advisor with extensive knowledge of French tax law and corporate regulations. You have been asked to prepare a comprehensive legal memorandum regarding <legal_issue>.
@@ -146,28 +152,31 @@ def call_model(state: AgentState) -> AgentState:
         ]
         response = model.invoke(messages)
     else:
-        response = model.invoke([HumanMessage(content=last_message)])
+        response = model.invoke([HumanMessage(content=last_message_content)])
 
-    state["messages"].append(AIMessage(content=response.content))
+    response_content = response.content if hasattr(response, 'content') else str(response)
+    state["messages"].append(AIMessage(content=response_content))
     return state
 
 
 def should_continue(state: AgentState) -> Literal["continue", "end"]:
-    last_message = state["messages"][-1].content.lower()
-    if any(keyword in last_message for keyword in ["recherche", "information", "question"]):
+    if not state["messages"]:
+        return "continue"
+
+    last_message = state["messages"][-1]
+    last_message_content = last_message.content.lower()
+
+    if any(keyword in last_message_content for keyword in ["recherche", "information", "question"]):
         state["next_action"] = "rag_search"
         return "continue"
-    elif any(keyword in last_message for keyword in
-             ["mémo", "document", "consultation", "mail", "memon", "mémorandum", "memorandum", "note", "rapport",
-              "analyse", "synthèse", "étude", "avis juridique", "conseil", "recommandation"]):
+    elif any(keyword in last_message_content for keyword in ["mémo", "document", "consultation", "mail", "memon", "mémorandum", "memorandum", "note", "rapport", "analyse", "synthèse", "étude", "avis juridique", "conseil", "recommandation"]):
         state["next_action"] = "draft_memo"
         return "continue"
-    elif "au revoir" in last_message or "terminer" in last_message:
+    elif "au revoir" in last_message_content or "terminer" in last_message_content:
         return "end"
     else:
         state["next_action"] = "standard_response"
         return "continue"
-
 
 def tool_node(state: AgentState):
     if state["next_action"] == "rag_search":
