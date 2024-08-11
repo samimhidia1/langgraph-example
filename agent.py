@@ -3,6 +3,9 @@ from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langchain_anthropic import ChatAnthropic
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Définissez d'abord le type Literal pour next_action
 NextAction = Literal["rag_search", "draft_memo", "standard_response", "end"]
@@ -17,9 +20,7 @@ class ChatState(TypedDict):
 
 
 # Initialisation du modèle Claude 3 Sonnet
-model = ChatAnthropic(model='claude-3-5-sonnet-20240620', max_tokens=8000, temperature=0.2)
-
-
+model = ChatAnthropic(model='claude-3-5-sonnet-20240620', max_tokens=4000, temperature=0.2)
 
 
 def get_ai_response(chat_history, question):
