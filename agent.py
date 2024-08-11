@@ -1,5 +1,6 @@
-import logging
+import json
 import os
+import time
 from typing import TypedDict, Annotated, Sequence, Dict
 from functools import lru_cache
 
@@ -12,33 +13,60 @@ from langgraph.graph import StateGraph, END, add_messages
 from langchain_anthropic import ChatAnthropic
 from langchain.prompts import ChatPromptTemplate
 from typing import List
+from dotenv import load_dotenv
+from requests import RequestException
+
+load_dotenv()
 
 
 # Function to get AI response from external API
-def get_ai_response(chat_history, question):
+def get_ai_response(chat_history, question, max_retries=3):
     url = "https://casusragyqouf1pv-casus-mvp-latest.functions.fnc.fr-par.scw.cloud/rag-conversation/invoke"
     headers = {"Content-Type": "application/json"}
+
+    # Format chat_history as a list of tuples
+    formatted_chat_history = []
+    for i in range(0, len(chat_history), 2):
+        if i + 1 < len(chat_history):
+            formatted_chat_history.append((chat_history[i], chat_history[i + 1]))
+
     payload = {
         "input": {
-            "chat_history": chat_history,
+            "chat_history": formatted_chat_history,
             "question": question
         },
         "config": {},
         "kwargs": {},
     }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        response.raise_for_status()
 
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            if response.status_code == 422:
+                print(f"Server response: {response.text}")
+                print(f"Sent payload: {json.dumps(payload, indent=2)}")
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)  # Exponential backoff
 
 # RAG tool function
 def rag_tool(query: str, chat_history: list) -> str:
-    # Generate a query to send to the RAG API
-    response = get_ai_response(chat_history, query)
-    return response
+    try:
+        # Ensure chat_history is a list of tuples
+        formatted_chat_history = []
+        for i in range(0, len(chat_history), 2):
+            if i + 1 < len(chat_history):
+                formatted_chat_history.append((chat_history[i], chat_history[i + 1]))
 
+        response = get_ai_response(formatted_chat_history, query)
+        return response
+    except Exception as e:
+        print(f"Error in RAG tool: {e}")
+        return "I apologize, but I encountered an error while retrieving information. Let me try to answer based on my general knowledge."
 
 # Function to open and read file content
 def open_file(file_path):
@@ -119,8 +147,12 @@ class AgentState(TypedDict, total=False):
 
 # Function to determine next action
 def should_continue(state: AgentState):
-    question_count = state["question_count"]
-    messages = state["messages"]
+    question_count = state.get("question_count", 0)
+    messages = state.get("messages", [])
+
+    if not messages:
+        return "end"
+
     last_message = messages[-1]
 
     if question_count < 2:
@@ -129,7 +161,6 @@ def should_continue(state: AgentState):
         return "end"
     else:
         return "continue"
-
 
 # System prompt
 system_prompt = """
@@ -203,45 +234,28 @@ def call_model(state: AgentState):
 # Function to use RAG tool
 
 
-def use_rag_tool(state: AgentState):
+def use_rag_tool(state):
+    rag_tool = [tool for tool in tools if tool.name == "RAG"][0]
+    messages = state["messages"]
+
+    # Extract chat history as a list of content strings
+    chat_history = [msg.content for msg in messages]
+
+    # Get the last human message
+    last_human_message = next(msg.content for msg in reversed(messages) if isinstance(msg, HumanMessage))
+
     try:
-        rag_tool = [tool for tool in tools if tool.name == "RAG"][0]
-
-        # Extract the last human message content
-        last_human_message = next(msg for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage))
-        query = last_human_message.content
-
-        # Extract chat history
-        chat_history = [
-            {"role": "human" if isinstance(msg, HumanMessage) else "ai", "content": msg.content}
-            for msg in state["messages"]
-            if isinstance(msg, (HumanMessage, AIMessage))
-        ]
-
-        # Call the RAG tool with the correct input format
-        rag_result = rag_tool.func(query=query, chat_history=chat_history)
-
-        # Convert Sequence to list before concatenating
-        updated_messages: List[BaseMessage] = list(state["messages"]) + [AIMessage(content=rag_result)]
-
-        return {
-            "messages": updated_messages,
-            "rag_result": rag_result,
-            "memo": state["memo"],
-            "question_count": (state.get("question_count") or 0) + 1
-        }
+        rag_result = rag_tool.func(last_human_message, chat_history)
     except Exception as e:
-        logging.error(f"Error in use_rag_tool: {str(e)}")
-        # Convert Sequence to list before concatenating
-        error_messages: List[BaseMessage] = list(state["messages"]) + [AIMessage(
-            content="I apologize, but I encountered an error while retrieving information. Could you please rephrase "
-                    "your question?")]
-        return {
-            "messages": error_messages,
-            "rag_result": "",
-            "memo": state["memo"],
-            "question_count": (state.get("question_count") or 0) + 1
-        }
+        print(f"Error in RAG tool: {e}")
+        rag_result = "I apologize, but I encountered an error while retrieving information. Let me try to answer based on my general knowledge."
+
+    return {
+        "messages": messages + [AIMessage(content=f"RAG result: {rag_result}")],
+        "rag_result": rag_result,
+        "memo": state.get("memo", ""),
+        "question_count": state.get("question_count", 0) + 1
+    }
 
 
 # Create workflow
@@ -271,29 +285,32 @@ graph = workflow.compile()
 
 # Function to run the workflow
 def run_workflow(user_input: str):
-    initial_state = AgentState(
+    state = AgentState(
         messages=[HumanMessage(content=user_input)],
         rag_result="",
         memo="",
-        question_count=0  # Ensure this is always initialized
+        question_count=0
     )
 
-    for output in graph.stream(initial_state):
+    for output in graph.stream(state):
+        state.update(output)  # Update the state with new information
+
         if "messages" in output:
-            for message in output["messages"]:
+            new_messages = [msg for msg in output["messages"] if msg not in state["messages"]]
+            for message in new_messages:
                 if isinstance(message, AIMessage):
                     print(f"AI: {message.content}")
+
+            if new_messages and isinstance(new_messages[-1], AIMessage):
+                user_input = input("Human: ")
+                state["messages"].append(HumanMessage(content=user_input))
+
         if output.get("memo"):
             print(f"Current Memo: {output['memo']}")
-        if len(output["messages"]) % 2 == 0:
-            user_input = input("Human: ")
-            output["messages"].append(HumanMessage(content=user_input))
 
-        # Print the current question count for debugging
-        print(f"Current question count: {output['question_count']}")
+        print(f"Current question count: {state.get('question_count', 'N/A')}")
 
     print("Workflow completed.")
-
 
 # Example usage
 if __name__ == "__main__":
