@@ -1,8 +1,8 @@
 from typing import List, TypedDict, Literal, Union
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
-from langserve.client import RemoteRunnable
 from langchain_anthropic import ChatAnthropic
+import requests
 
 # Définissez d'abord le type Literal pour next_action
 NextAction = Literal["rag_search", "draft_memo", "standard_response", "end"]
@@ -16,23 +16,53 @@ class ChatState(TypedDict):
     legal_issue: str
 
 
-# Initialisation du RemoteRunnable pour RAG
-rag_runnable = RemoteRunnable(
-    "https://casusragyqouf1pv-casus-mvp-latest.functions.fnc.fr-par.scw.cloud/rag-conversation")
-
 # Initialisation du modèle Claude 3 Sonnet
 model = ChatAnthropic(model='claude-3-5-sonnet-20240620', max_tokens=8000, temperature=0.2)
 
 
-# Fonction pour la recherche RAG
+
+
+def get_ai_response(chat_history, question):
+    url = "https://casusragyqouf1pv-casus-mvp-latest.functions.fnc.fr-par.scw.cloud/rag-conversation/invoke"
+    headers = {"Content-Type": "application/json"}
+    print("chat_history", chat_history)
+    payload = {
+        "input": {
+            "chat_history": chat_history,
+            "question": question
+        },
+        "config": {},
+        "kwargs": {},
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        response.raise_for_status()
+
+
 def function_casus_search(state: ChatState):
     question = state["messages"][-1].content
-    response = rag_runnable.invoke(input={
-        "chat_history": state["chat_history"],
-        "question": question
-    })
-    state["messages"].append(AIMessage(content=response))
-    state["chat_history"].append([question, response])
+
+    # Préparer l'historique du chat dans le format attendu par get_ai_response
+    chat_history = [(msg.content, state["messages"][i + 1].content)
+                    for i, msg in enumerate(state["messages"][:-1:2])]
+
+    try:
+        response_json = get_ai_response(chat_history, question)
+
+        # Extraire la réponse du JSON retourné
+        ai_response = response_json.get('output', "Désolé, je n'ai pas pu obtenir une réponse.")
+
+        state["messages"].append(AIMessage(content=ai_response))
+        state["chat_history"].append([question, ai_response])
+    except Exception as e:
+        error_message = f"Une erreur s'est produite lors de la recherche : {str(e)}"
+        state["messages"].append(AIMessage(content=error_message))
+        state["chat_history"].append([question, error_message])
+
     return state
 
 
