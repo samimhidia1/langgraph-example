@@ -1,322 +1,228 @@
-import json
-import os
-import time
-from typing import TypedDict, Annotated, Sequence, Dict
-from functools import lru_cache
-
-import requests
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from langchain.tools import Tool
-from langgraph.prebuilt import ToolNode
-from langgraph.graph import StateGraph, END, add_messages
+from typing import List, TypedDict, Literal, Union
+from langchain.schema import HumanMessage, AIMessage, SystemMessage
+from langgraph.graph import StateGraph, END
+from langserve.client import RemoteRunnable
 from langchain_anthropic import ChatAnthropic
-from langchain.prompts import ChatPromptTemplate
-from typing import List
-from requests import RequestException
+
+# Définissez d'abord le type Literal pour next_action
+NextAction = Literal["rag_search", "draft_memo", "standard_response", "end"]
 
 
-
-# Function to get AI response from external API
-def get_ai_response(chat_history, question, max_retries=3):
-    url = "https://casusragyqouf1pv-casus-mvp-latest.functions.fnc.fr-par.scw.cloud/rag-conversation/invoke"
-    headers = {"Content-Type": "application/json"}
-
-    # Format chat_history as a list of tuples
-    formatted_chat_history = []
-    for i in range(0, len(chat_history), 2):
-        if i + 1 < len(chat_history):
-            formatted_chat_history.append((chat_history[i], chat_history[i + 1]))
-
-    payload = {
-        "input": {
-            "chat_history": formatted_chat_history,
-            "question": question
-        },
-        "config": {},
-        "kwargs": {},
-    }
-
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            return response.json()
-        except RequestException as e:
-            print(f"Attempt {attempt + 1} failed: {e}")
-            if response.status_code == 422:
-                print(f"Server response: {response.text}")
-                print(f"Sent payload: {json.dumps(payload, indent=2)}")
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(2 ** attempt)  # Exponential backoff
+# Définition de l'état du chat
+class ChatState(TypedDict):
+    messages: List[Union[HumanMessage, AIMessage]]
+    chat_history: List[List[str]]
+    next_action: NextAction
+    legal_issue: str
 
 
-# RAG tool function
-def rag_tool(query: str, chat_history: list) -> str:
-    try:
-        # Ensure chat_history is a list of tuples
-        formatted_chat_history = []
-        for i in range(0, len(chat_history), 2):
-            if i + 1 < len(chat_history):
-                formatted_chat_history.append((chat_history[i], chat_history[i + 1]))
+# Initialisation du RemoteRunnable pour RAG
+rag_runnable = RemoteRunnable(
+    "https://casusragyqouf1pv-casus-mvp-latest.functions.fnc.fr-par.scw.cloud/rag-conversation")
 
-        response = get_ai_response(formatted_chat_history, query)
-        return response
-    except Exception as e:
-        print(f"Error in RAG tool: {e}")
-        return "I apologize, but I encountered an error while retrieving information. Let me try to answer based on my general knowledge."
+# Initialisation du modèle Claude 3 Sonnet
+model = ChatAnthropic(model='claude-3-5-sonnet-20240620', max_tokens=8000, temperature=0.2)
 
 
-# Function to open and read file content
-def open_file(file_path):
-    with open(file_path, "r", encoding='utf-8') as file:
-        return file.read()
+# Fonction pour la recherche RAG
+def function_casus_search(state: ChatState):
+    question = state["messages"][-1].content
+    response = rag_runnable.invoke(input={
+        "chat_history": state["chat_history"],
+        "question": question
+    })
+    state["messages"].append(AIMessage(content=response))
+    state["chat_history"].append([question, response])
+    return state
 
 
-# Function to generate memo
-def generate_memo(chat_history):
-    model = ChatAnthropic(
-        model="claude-3-sonnet-20240320",
-        max_tokens=4000,
-        temperature=0.2,
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY")
-    )
-    system_prompt = open_file("prompt/claude_system_memo_prompt.txt")
-    user_prompt_template = open_file("prompt/claude_user_memo_prompt.txt")
-    prompt = ChatPromptTemplate.from_messages([
+# Fonction pour générer un mémo
+def function_casus_draft(state: ChatState):
+    system_prompt = """
+    You are a highly experienced legal expert and tax advisor with extensive knowledge of French tax law and corporate regulations. You have been asked to prepare a comprehensive legal memorandum regarding <legal_issue>.
+
+    In formulating your analysis and recommendations, you must base all of your reasoning and factual assertions on the information provided in the <chat_history>. Please ensure that your memo is grounded in and consistent with the details discussed in our previous conversation.
+
+    Please structure your memo as follows:
+
+    ## 1. Introduction
+
+    - Briefly describe the context and purpose of the memo
+    - Clearly state the legal issue(s) to be addressed
+    - Provide an overview of the memo's structure
+
+    ## 2. Analyse
+
+    ### 2.1. Principe général
+
+    - Explain the fundamental principles related to <legal_issue>
+    - Reference relevant articles from the Code Général des Impôts (CGI) or other applicable laws, regulations, and jurisprudence
+
+    ### 2.2. Conditions et règles spécifiques
+
+    - Detail the specific conditions and rules applicable to <legal_issue>
+    - Use numbered or bulleted lists for clarity when appropriate
+    - Provide examples to illustrate complex points
+
+    ### 2.3. Cas particuliers
+
+    - Identify and explain any special cases or exceptions related to <legal_issue>
+    - Discuss how these cases might affect the general rules
+
+    ### 2.4. Application pratique
+
+    - Apply the legal analysis to the specific circumstances of <client_name>
+    - Address each of the following questions:
+      <specific_questions>
+
+    ## 3. Recommandations
+
+    - Provide clear, actionable recommendations based on your analysis
+    - Consider both short-term and long-term implications
+    - Highlight potential strategies for optimization within the legal framework
+
+    ## 4. Conclusion
+
+    - Summarize the key points of your analysis
+    - Restate the most important recommendations
+    - Highlight any areas of uncertainty or potential risks
+
+    ## 5. Références
+
+    - List relevant legal texts, articles, and official documents cited in the memo with proper formatting and provide clickable and complete URLs
+    - Include links to online resources and full clickable URLs
+    - Format references consistently, providing full citations
+
+    Throughout your memo, ensure that you:
+
+    - Use formal, professional language appropriate for legal communication in French
+    - Provide detailed explanations and reasoning for your conclusions
+    - Cite relevant laws, regulations, and administrative guidelines where necessary
+    - Use numbered sections and subsections with a well-structured comprehensive and professional answer for clear organization
+    - Bold or italicize key points for emphasis
+    - Use tables or charts if they can help clarify complex information
+    - Use line breaks for better readability and organization
+    - Use Markdown formatting for headings, lists, and emphasis
+
+    Before finalizing the memo:
+    - Double-check all legal references for accuracy
+    - Ensure consistency in terminology and formatting throughout the document
+    - Verify that all <specific_questions> have been adequately addressed
+    """
+
+    user_message = f"""
+    Generate an outstanding memo using the entire context provided below, including the chat history and legal issue. Be comprehensive, detailed, and provide rich and accurate answers.
+
+    <chat_history>
+    {state['chat_history']}
+    </chat_history>
+
+    <legal_issue>
+    {state['legal_issue']}
+    </legal_issue>
+
+    This is the specific legal issue you need to address with verbosity, precision, and contextual accuracy. Use the information from the chat history to inform your analysis and recommendations.
+
+    Begin your response immediately after these instructions, starting with the document title.
+
+    Ensure your answer is comprehensive, well-structured, and rich in accurate legal references, including all relevant URLs from the provided context and chat history.
+
+    Use formal, professional language and provide detailed explanations and reasoning for your conclusions as the best top-notch tax lawyer in the world would do.
+
+    Walk me through this context in manageable parts step by step, summarizing and analyzing as we go. Make sure to integrate relevant information from the chat history into your analysis.
+
+    Begin your response immediately after these instructions, starting with the document title.
+    """
+
+    messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt_template)
-    ])
-    formatted_prompt = prompt.format_messages(CHAT_HISTORY=str(chat_history))
-    response = model(formatted_prompt)
-    print(response.content)
-    return response.content
+        HumanMessage(content=user_message)
+    ]
+
+    response = model(messages)
+    state["messages"].append(AIMessage(content=response.content))
+    return state
 
 
-# Memo tool function
-def memo_tool(conversation_history: str) -> str:
-    memo = generate_memo(conversation_history)
-    print(f"Generated memo: {memo}")
-    return memo
+def standard_response(state: ChatState):
+    question = state["messages"][-1].content
+    response = model([HumanMessage(content=question)])
+    state["messages"].append(AIMessage(content=response.content))
+    return state
 
 
-# Function to edit memo
-def edit_memo(current_memo: str, edit_request: str) -> str:
-    model = ChatAnthropic(
-        model="claude-3.5-sonnet-20240320",
-        max_tokens=8000,
-        temperature=0.2,
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY")
-    )
-    system_prompt = open_file("prompt/claude_system_edit_memo_prompt.txt")
-    user_prompt_template = open_file("prompt/claude_user_edit_memo_prompt.txt")
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt_template)
-    ])
-    formatted_prompt = prompt.format_messages(CURRENT_MEMO=current_memo, EDIT_REQUEST=edit_request)
-    response = model(formatted_prompt)
-    print(response.content)
-    return response.content
+# Fonction pour décider de la prochaine action
+def decide_next_action(state: ChatState) -> ChatState:
+    last_message = state["messages"][-1].content.lower()
 
-
-# Define tools
-tools = [
-    Tool.from_function(func=rag_tool, name="RAG", description="Retrieves information to answer questions"),
-    Tool.from_function(func=memo_tool, name="MemoGenerator", description="Generates a structured memo"),
-    Tool.from_function(func=edit_memo, name="EditMemo", description="Edits the existing memo")
-]
-
-
-# Get model (cached)
-@lru_cache(maxsize=1)
-def _get_model():
-    model = ChatOpenAI(temperature=0, model_name="gpt-4")
-    model = model.bind_tools(tools)
-    return model
-
-
-# Define AgentState
-class AgentState(TypedDict, total=False):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    rag_result: str
-    memo: str
-    question_count: int
-
-
-# Function to determine next action
-def should_continue(state: AgentState):
-    question_count = state.get("question_count", 0)
-    messages = state.get("messages", [])
-
-    if not messages:
-        return "end"
-
-    last_message = messages[-1]
-
-    if question_count < 2:
-        return "use_rag"
-    elif not isinstance(last_message, AIMessage) or not last_message.tool_calls:
-        return "end"
+    if any(keyword in last_message for keyword in ["recherche", "information", "question"]):
+        state["next_action"] = "rag_search"
+    elif any(keyword in last_message for keyword in
+             ["mémo", "document", "consultation", "mail", "memon", "mémorandum", "memorandum", "note", "rapport",
+              "analyse", "synthèse", "étude", "avis juridique", "conseil", "recommandation"]):
+        state["next_action"] = "draft_memo"
+    elif "au revoir" in last_message or "terminer" in last_message:
+        state["next_action"] = "end"
     else:
-        return "continue"
+        state["next_action"] = "standard_response"
+
+    return state
 
 
-# System prompt
-system_prompt = """
-You are an advanced AI assistant managing a multi-tool workflow for complex information tasks. Your primary tools are:
+# Création du graphe
+workflow = StateGraph(ChatState)
 
-1. RAG (Retrieval-Augmented Generation): Your default tool for answering questions and providing up-to-date information.
-2. MemoGenerator: For creating structured summaries of conversations or complex information.
-3. EditMemo: For modifying existing memos based on user requests.
+# Ajout des nœuds
+workflow.add_node("decide_action", decide_next_action)
+workflow.add_node("rag_search", function_casus_search)
+workflow.add_node("draft_memo", function_casus_draft)
+workflow.add_node("standard_response", standard_response)
 
-Guidelines:
-
-1. Tool Selection:
-   - Default to RAG for most queries.
-   - Use MemoGenerator when explicitly requested or when summarizing complex information would be beneficial.
-   - Use EditMemo only when modifying an existing memo.
-
-2. Workflow Management:
-   - Assess each user request carefully before selecting a tool.
-   - Transition smoothly between tools as needed, explaining your actions to the user.
-   - Build upon previous information to avoid repetition.
-
-3. User Interaction:
-   - If a request is ambiguous, ask for clarification before proceeding.
-   - Clearly communicate your actions, especially when switching tools.
-   - Provide concise, relevant responses focused on addressing the user's needs.
-
-4. Information Handling:
-   - Ensure all information provided is accurate and up-to-date.
-   - Organize complex information logically and coherently.
-   - When using RAG multiple times, synthesize information to provide comprehensive answers.
-
-5. Memo Management:
-   - Create memos that are clear, structured, and easy to understand.
-   - When editing memos, maintain their overall structure and clarity.
-   - Confirm user satisfaction after memo creation or editing.
-
-Your goal is to provide efficient, accurate, and helpful assistance while seamlessly integrating the various tools at your disposal. Adapt your communication style to the user's needs and the complexity of the task at hand.
-"""
-
-
-# Function to call the model
-
-
-def call_model(state: AgentState):
-    messages = state["messages"]
-    model = _get_model()
-
-    # Convert messages to the format expected by the model
-    formatted_messages: List[Dict[str, str]] = [
-                                                   {"role": "system", "content": system_prompt}
-                                               ] + [
-                                                   {
-                                                       "role": "user" if isinstance(msg,
-                                                                                    HumanMessage) else "assistant" if isinstance(
-                                                           msg, AIMessage) else "system",
-                                                       "content": msg.content
-                                                   }
-                                                   for msg in messages
-                                               ]
-
-    response = model.invoke(formatted_messages)
-
-    # Convert the response to an AIMessage
-    ai_response = AIMessage(content=response.content)
-
-    return {
-        "messages": list(state["messages"]) + [ai_response],  # Convert Sequence to list before concatenating
-        "question_count": (state.get("question_count") or 0) + 1
-    }
-
-
-# Function to use RAG tool
-
-
-def use_rag_tool(state):
-    rag_tool = [tool for tool in tools if tool.name == "RAG"][0]
-    messages = state["messages"]
-
-    # Extract chat history as a list of content strings
-    chat_history = [msg.content for msg in messages]
-
-    # Get the last human message
-    last_human_message = next(msg.content for msg in reversed(messages) if isinstance(msg, HumanMessage))
-
-    try:
-        rag_result = rag_tool.func(last_human_message, chat_history)
-    except Exception as e:
-        print(f"Error in RAG tool: {e}")
-        rag_result = "I apologize, but I encountered an error while retrieving information. Let me try to answer based on my general knowledge."
-
-    return {
-        "messages": messages + [AIMessage(content=f"RAG result: {rag_result}")],
-        "rag_result": rag_result,
-        "memo": state.get("memo", ""),
-        "question_count": state.get("question_count", 0) + 1
-    }
-
-
-# Create workflow
-workflow = StateGraph(AgentState)
-
-workflow.add_node("agent", call_model)
-workflow.add_node("action", ToolNode(tools))
-workflow.add_node("use_rag", use_rag_tool)
-
-workflow.set_entry_point("agent")
+# Configuration des arêtes
+workflow.set_entry_point("decide_action")
 
 workflow.add_conditional_edges(
-    "agent",
-    should_continue,
+    "decide_action",
+    lambda state: state["next_action"],
     {
-        "use_rag": "use_rag",
-        "continue": "action",
-        "end": END,
-    },
+        "rag_search": "rag_search",
+        "draft_memo": "draft_memo",
+        "standard_response": "standard_response",
+        "end": END
+    }
 )
 
-workflow.add_edge("action", "agent")
-workflow.add_edge("use_rag", "agent")
+for node in ["rag_search", "draft_memo", "standard_response"]:
+    workflow.add_edge(node, "decide_action")
 
-graph = workflow.compile()
-
-
-# Function to run the workflow
-def run_workflow(user_input: str):
-    state = AgentState(
-        messages=[HumanMessage(content=user_input)],
-        rag_result="",
-        memo="",
-        question_count=0
-    )
-
-    for output in graph.stream(state):
-        state.update(output)  # Update the state with new information
-
-        if "messages" in output:
-            new_messages = [msg for msg in output["messages"] if msg not in state["messages"]]
-            for message in new_messages:
-                if isinstance(message, AIMessage):
-                    print(f"AI: {message.content}")
-
-            if new_messages and isinstance(new_messages[-1], AIMessage):
-                user_input = input("Human: ")
-                state["messages"].append(HumanMessage(content=user_input))
-
-        if output.get("memo"):
-            print(f"Current Memo: {output['memo']}")
-
-        print(f"Current question count: {state.get('question_count', 'N/A')}")
-
-    print("Workflow completed.")
+# Compilation du graphe
+chatbot = workflow.compile()
 
 
-# Example usage
+# Fonction pour exécuter le chat
+def chat():
+    state: ChatState = {
+        "messages": [],
+        "chat_history": [],
+        "next_action": "standard_response",  # Ceci est maintenant un Literal valide
+        "legal_issue": ""
+    }
+    print("Bot : Bonjour ! Comment puis-je vous aider aujourd'hui ?")
+    while True:
+        user_input = input("Vous : ")
+        state["messages"].append(HumanMessage(content=user_input))
+
+        if any(keyword in user_input.lower() for keyword in
+               ["mémo", "document", "consultation", "mail", "memon", "mémorandum", "memorandum", "note", "rapport",
+                "analyse", "synthèse", "étude", "avis juridique", "conseil", "recommandation"]):
+            state["legal_issue"] = input("Veuillez préciser le problème juridique pour le mémo : ")
+
+        state = chatbot.invoke(state)
+        print("Bot :", state["messages"][-1].content)
+        if state["next_action"] == "end":
+            break
+
+
+# Lancer le chat
 if __name__ == "__main__":
-    print("Welcome to the Multi-Agent Assistant!")
-    initial_question = input("Human: ")
-    run_workflow(initial_question)
+    chat()
