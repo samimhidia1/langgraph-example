@@ -170,14 +170,14 @@ def function_casus_draft(state: ChatState):
         HumanMessage(content=user_message)
     ]
 
-    response = model(messages)
+    response = model.invoke(messages)
     state["messages"].append(AIMessage(content=response.content))
     return state
 
 
 def standard_response(state: ChatState):
     question = state["messages"][-1].content
-    response = model([HumanMessage(content=question)])
+    response = model.invoke([HumanMessage(content=question)])
     state["messages"].append(AIMessage(content=response.content))
     return state
 
